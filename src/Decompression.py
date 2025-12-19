@@ -7,149 +7,165 @@ def printColor(color):
     }
 
     if color not in table:
-        raise ValueError("Invalid color code. Must be one of 00, 01, 10, or 11.")
+        raise ValueError("Invalid color code.")
     
     print(f"\033[{table[color]}m  \033[0m", end='')
 
 class BitStream:
-    def __init__(self, bin_str):
-        self.bin_str = bin_str
+    def __init__(self, data: bytes):
+        self.data = int.from_bytes(data, "big")
+        self.length = len(data) * 8
         self.pointer = 0
 
-    def consume(self, length):
-        bits = self.bin_str[self.pointer:self.pointer + length]
-        self.pointer += length
-        return bits
+    def consume(self, n):
+        shift = self.length - self.pointer - n
+        value = (self.data >> shift) & ((1 << n) - 1)
+        self.pointer += n
+        return value
 
 class Sprite(BitStream):
-    def __init__(self, bin_str):
-        super().__init__(bin_str)
+    def __init__(self, data: bytes):
+        super().__init__(data)
 
-        self.sprite_width = int(self.consume(4), 2)
-        self.sprite_height = int(self.consume(4), 2)
-        self.sprite_size = self.sprite_width * self.sprite_height
-
-        # 0 = Buffer B, 1 = Buffer C
-        self.buffer_type = int(self.consume(1), 2)
-
-        # 0 = RLE, 1 = Data
-        self.packet_type = int(self.consume(1), 2)
-
-        # "0" = Mode 1, "10" = Mode 2, "11" = Mode 3
-        self.decoding_method = "0"
-
+        self.sprite_width = self.consume(4)
+        self.sprite_height = self.consume(4)
+        
         self.width_px = self.sprite_width * 8
         self.height_px = self.sprite_height * 8
         self.total_px = self.width_px * self.height_px
 
-        empty = ["0"] * self.total_px
-        self.Buffer_A = empty.copy()
-        self.Buffer_B = empty.copy()
-        self.Buffer_C = empty.copy()
+        # 0 = Buffer B, 1 = Buffer C
+        self.buffer_type = self.consume(1)
 
-    def _index(self, x, y):
-        return x + y * self.width_px
+        # 0 = RLE, 1 = Data
+        self.packet_type = self.consume(1)
 
-    def getBuffer(self, buffer_type):
-        return self.Buffer_B if buffer_type == 0 else self.Buffer_C
+        # 0b0 = Mode 1, 0b10 = Mode 2, 0b11 = Mode 3
+        self.decoding_method = 0
 
-    def getDataFromBuffer(self, buffer_type, x, y):
-        return self.getBuffer(buffer_type)[self._index(x, y)]
+        self.Buffer_A = bytearray(self.total_px)
+        self.Buffer_B = bytearray(self.total_px)
+        self.Buffer_C = bytearray(self.total_px)
 
-    def putDataToBuffer(self, buffer_type, x, y, data):
-        buffer = self.getBuffer(buffer_type)
+    def getBuffer(self, t):
+        return self.Buffer_B if t == 0 else self.Buffer_C
+
+    def putData(self, buffer, idx, data):
+        h = self.height_px
+        w = self.width_px
+
+        x = idx // h
+        y = idx % h
 
         for bit in data:
-            idx = self._index(x, y)
-        
-            if idx >= self.total_px:
+            if x >= w:
                 break
-            
-            buffer[self._index(x, y)] = bit
+
+            buffer[x * h + y] = bit
 
             y += 1
 
-            if y >= self.height_px:
+            if y == h:
                 y = 0
                 x += 1
 
-                if x >= self.width_px:
-                    break
+        return x * h + y
 
-        return x, y
+    def decodeRLEPacket(self, buffer, idx):
+        buf = 0
+        bits = 0
+
+        while True:
+            b = self.consume(1)
+            buf = (buf << 1) | b
+            bits += 1
+
+            if b == 0:
+                break
+
+        length = buf + self.consume(bits) + 1
+
+        # RLE = "00" * length
+        return self.putData(buffer, idx, bytearray(length * 2))
+
+    def decodeDataPacket(self, buffer, idx):
+        out = bytearray()
+
+        while True:
+            v = self.consume(2)
+
+            if v == 0:
+                break
+
+            out.append((v >> 1) & 1)
+            out.append(v & 1)
+
+        return self.putData(buffer, idx, out)
 
     def decompress(self):
-        x = y = 0
+        idx = 0
 
-        while self._index(x, y) < self.total_px:            
-            if self.packet_type == 0:
-                x, y = self.decodeRLEPacket(x, y)
+        buffer = self.getBuffer(self.buffer_type)
+        packet = self.packet_type
+
+        while idx < self.total_px:
+            if packet == 0:
+                idx = self.decodeRLEPacket(buffer, idx)
 
             else:
-                x, y = self.decodeDataPacket(x, y)
+                idx = self.decodeDataPacket(buffer, idx)
 
-            self.packet_type ^= 1
+            packet ^= 1
 
+        self.packet_type = packet
         self.buffer_type ^= 1
-
-    def decodeRLEPacket(self, x, y):
-        buf = self.consume(1)
-
-        while buf[-1] != "0":
-            buf += self.consume(1)
-
-        length = int(buf, 2) + int(self.consume(len(buf)), 2) + 1
-
-        return self.putDataToBuffer(self.buffer_type, x, y, "00" * length)
-
-    def decodeDataPacket(self, x, y):
-        buf = self.consume(2)
-
-        while buf[-2:] != "00":
-            buf += self.consume(2)
-
-        return self.putDataToBuffer(self.buffer_type, x, y, buf[:-2])
 
     def getEncodingMethod(self):
         self.decoding_method = self.consume(1)
 
-        if self.decoding_method == "1":
-            self.decoding_method += self.consume(1)
+        if self.decoding_method == 1:
+            self.decoding_method = (self.decoding_method << 1) | self.consume(1)
 
-        self.packet_type = int(self.consume(1), 2)
+        self.packet_type = self.consume(1)
 
     def decode(self):
-        pri = self.buffer_type
-        sec = self.buffer_type ^ 1
+        pri = self.getBuffer(self.buffer_type)
+        sec = self.getBuffer(self.buffer_type ^ 1)
 
-        if self.decoding_method != "10":
+        h = self.height_px
+        w = self.width_px
+
+        if self.decoding_method != 0b10:
+            for x in range(w):
+                base = x * h
+                bit = 0
+
+                for y in range(h):
+                    i = base + y
+                    bit ^= sec[i]
+                    sec[i] = bit
+
+        for x in range(w):
+            base = x * h
             bit = 0
 
-            for x in range(self.width_px):
-                for y in range(self.height_px):
-                    bit ^= int(self.getDataFromBuffer(sec, x, y))
-                    self.putDataToBuffer(sec, x, y, str(bit))
+            for y in range(h):
+                i = base + y
+                bit ^= pri[i]
+                pri[i] = bit
 
-        bit = 0
-
-        for x in range(self.width_px):
-            for y in range(self.height_px):
-                bit ^= int(self.getDataFromBuffer(pri, x, y))
-                self.putDataToBuffer(pri, x, y, str(bit))
-
-        if self.decoding_method != "0":
-            for x in range(self.width_px):
-                for y in range(self.height_px):
-                    bit = int(self.getDataFromBuffer(pri, x, y)) ^ int(self.getDataFromBuffer(sec, x, y))
-                    self.putDataToBuffer(sec, x, y, str(bit))
+        if self.decoding_method != 0b0:
+            for i in range(self.total_px):
+                sec[i] ^= pri[i]
 
         # TODO: Buffer A rendering
 
     def printStatus(self):
-        print(f"Sprite Width: {self.sprite_width} tiles ({self.width_px} px)")
-        print(f"Sprite Height: {self.sprite_height} tiles ({self.height_px} px)")
-        print(f"Decoding Method: {self.decoding_method}")
-        print(f"Final Buffer: {'B' if self.buffer_type == 1 else 'C'}; {self.Buffer_B if self.buffer_type == 1 else self.Buffer_C}\n")
+        print(f"Sprite Width  : {self.sprite_width} tiles ({self.width_px} px)")
+        print(f"Sprite Height : {self.sprite_height} tiles ({self.height_px} px)")
+        print(f"Decoding Mode : {self.decoding_method}")
+        print(f"Final Buffer  : {'B' if self.buffer_type == 0 else 'C'}")
+        print(f"Pointer       : {self.pointer} / {self.length}\n")
 
     def render(self):
         pass
@@ -158,16 +174,19 @@ def main():
     file_adr = input("Enter the compressed binary file address (*.bin): ")
     
     with open(file_adr, "rb") as f:
-        bin_str = ''.join(f'{b:08b}' for b in f.read())
+        data = f.read()
 
-    sprite = Sprite(bin_str)
+    sprite = Sprite(data)
 
     sprite.decompress()
     sprite.printStatus()
+
     sprite.getEncodingMethod()
     sprite.printStatus()
+
     sprite.decompress()
     sprite.printStatus()
+
     sprite.decode()
     sprite.printStatus()
 
