@@ -43,25 +43,24 @@ class Sprite(BitStream):
         # 0b0 = Mode 1, 0b10 = Mode 2, 0b11 = Mode 3
         self.decoding_method = 0
 
-        self.Buffer_A = bytearray(self.total_px)
-        self.Buffer_B = bytearray(self.total_px)
-        self.Buffer_C = bytearray(self.total_px)
+        self.Buffer_A = bytearray(7 * 7 * 8 * 8)
+        self.Buffer_B = bytearray(7 * 7 * 8 * 8)
+        self.Buffer_C = bytearray(7 * 7 * 8 * 8)
+
+        self.Sprite = bytearray(7 * 7 * 8 * 2)
 
     def getBuffer(self, t):
         return self.Buffer_B if t == 0 else self.Buffer_C
 
-    def putData(self, buffer, idx, data):
+    def putData(self, buffer, x, y, data):
         h = self.height_px
         w = self.width_px
-
-        x = idx // h
-        y = idx % h
 
         for bit in data:
             if x >= w:
                 break
 
-            buffer[x * h + y] = bit
+            buffer[x + y * w] = bit
 
             y += 1
 
@@ -69,9 +68,9 @@ class Sprite(BitStream):
                 y = 0
                 x += 1
 
-        return x * h + y
+        return x, y
 
-    def decodeRLEPacket(self, buffer, idx):
+    def decodeRLEPacket(self, buffer, x, y):
         buf = 0
         bits = 0
 
@@ -86,9 +85,9 @@ class Sprite(BitStream):
         length = buf + self.consume(bits) + 1
 
         # RLE = "00" * length
-        return self.putData(buffer, idx, bytearray(length * 2))
+        return self.putData(buffer, x, y, bytearray(length * 2))
 
-    def decodeDataPacket(self, buffer, idx):
+    def decodeDataPacket(self, buffer, x, y):
         out = bytearray()
 
         while True:
@@ -100,20 +99,20 @@ class Sprite(BitStream):
             out.append((v >> 1) & 1)
             out.append(v & 1)
 
-        return self.putData(buffer, idx, out)
+        return self.putData(buffer, x, y, out)
 
     def decompress(self):
-        idx = 0
+        x = y = 0
 
         buffer = self.getBuffer(self.buffer_type)
         packet = self.packet_type
 
-        while idx < self.total_px:
+        while x < self.width_px:
             if packet == 0:
-                idx = self.decodeRLEPacket(buffer, idx)
+                x, y = self.decodeRLEPacket(buffer, x, y)
 
             else:
-                idx = self.decodeDataPacket(buffer, idx)
+                x, y = self.decodeDataPacket(buffer, x, y)
 
             packet ^= 1
 
@@ -135,37 +134,76 @@ class Sprite(BitStream):
         h = self.height_px
         w = self.width_px
 
+        x_offset = int(4 - self.sprite_width / 2) * 8
+        y_offset = (7 - self.sprite_height) * 8
+
         if self.decoding_method != 0b10:
             for x in range(w):
-                base = x * h
                 bit = 0
 
                 for y in range(h):
-                    i = base + y
-                    bit ^= sec[i]
-                    sec[i] = bit
+                    bit ^= sec[x + y * w]
+                    sec[x + y * w] = bit
 
         for x in range(w):
-            base = x * h
             bit = 0
 
             for y in range(h):
-                i = base + y
-                bit ^= pri[i]
-                pri[i] = bit
+                bit ^= pri[x + y * w]
+                pri[x + y * w] = bit
 
         if self.decoding_method != 0b0:
             for i in range(self.total_px):
                 sec[i] ^= pri[i]
+        
+        for ty in range(h):
+            for tx in range(self.sprite_width):
+                src = tx * 8 + ty * w
+                dst = (tx * 8 + x_offset) + (ty + y_offset) * w
 
-        # TODO: Buffer A rendering
+                self.Buffer_A[dst:dst + 8] = self.Buffer_B[src:src + 8]
 
-    def printStatus(self):
-        print(f"Sprite Width  : {self.sprite_width} tiles ({self.width_px} px)")
-        print(f"Sprite Height : {self.sprite_height} tiles ({self.height_px} px)")
-        print(f"Decoding Mode : {self.decoding_method}")
-        print(f"Final Buffer  : {'B' if self.buffer_type == 0 else 'C'}")
-        print(f"Pointer       : {self.pointer} / {self.length}\n")
+        self.Buffer_B = bytearray(7 * 7 * 8 * 8)
+
+        for ty in range(h):
+            for tx in range(self.sprite_width):
+                src = tx * 8 + ty * w
+                dst = (tx * 8 + x_offset) + (ty + y_offset) * w
+
+                self.Buffer_B[dst:dst + 8] = self.Buffer_C[src:src + 8]
+        
+        for y in range(h):
+            out = (y * w) * 2
+
+            for y in range(self.sprite_width):
+                base = x * 8 + y * w
+
+                b0 = (
+                    (self.Buffer_A[base + 0] << 7) |
+                    (self.Buffer_A[base + 1] << 6) |
+                    (self.Buffer_A[base + 2] << 5) |
+                    (self.Buffer_A[base + 3] << 4) |
+                    (self.Buffer_A[base + 4] << 3) |
+                    (self.Buffer_A[base + 5] << 2) |
+                    (self.Buffer_A[base + 6] << 1) |
+                    (self.Buffer_A[base + 7])
+                )
+
+                b1 = (
+                    (self.Buffer_B[base + 0] << 7) |
+                    (self.Buffer_B[base + 1] << 6) |
+                    (self.Buffer_B[base + 2] << 5) |
+                    (self.Buffer_B[base + 3] << 4) |
+                    (self.Buffer_B[base + 4] << 3) |
+                    (self.Buffer_B[base + 5] << 2) |
+                    (self.Buffer_B[base + 6] << 1) |
+                    (self.Buffer_B[base + 7])
+                )
+
+                self.Sprite[y * w * 2]     = b0
+                self.Sprite[y * w * 2 + 1] = b1
+
+                out += 2
 
     def render(self):
         pass
@@ -179,16 +217,14 @@ def main():
     sprite = Sprite(data)
 
     sprite.decompress()
-    sprite.printStatus()
-
+    printColor(0x00)
     sprite.getEncodingMethod()
-    sprite.printStatus()
-
+    printColor(0x01)
     sprite.decompress()
-    sprite.printStatus()
-
+    printColor(0x10)
     sprite.decode()
-    sprite.printStatus()
+    printColor(0x11)
+    sprite.render()
 
 if __name__ == "__main__":
     main()
