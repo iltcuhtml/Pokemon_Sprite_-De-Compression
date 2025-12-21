@@ -54,9 +54,6 @@ class Sprite(BitStream):
 
     def putData(self, buffer, x, y, data):
         for bit in data:
-            if x >= 56:
-                break
-
             buffer[x + y * 56] = bit
 
             y += 1
@@ -104,7 +101,7 @@ class Sprite(BitStream):
         buffer = self.getBuffer(self.buffer_type)
         packet = self.packet_type
 
-        while x + y * 56 < self.total_px:
+        while x * 56 + y < self.total_px:
             if packet == 0:
                 x, y = self.decodeRLEPacket(buffer, x, y)
 
@@ -133,15 +130,12 @@ class Sprite(BitStream):
 
         x_offset = int(4 - self.sprite_width / 2) * 8
         y_offset = (7 - self.sprite_height) * 8
-
-        print(self.Buffer_B)
-        print(self.Buffer_C)
         
         if self.decoding_method != 0b10:
             x = y = 0
             bit = 0
 
-            while x + y * 56 < self.total_px:
+            while x * 56 + y < self.total_px:
                 bit ^= sec[x + y * 56]
                 sec[x + y * 56] = bit
 
@@ -154,7 +148,7 @@ class Sprite(BitStream):
         x = y = 0
         bit = 0
 
-        while x + y * 56 < self.total_px:
+        while x * 56 + y < self.total_px:
             bit ^= pri[x + y * 56]
             pri[x + y * 56] = bit
 
@@ -167,7 +161,7 @@ class Sprite(BitStream):
         if self.decoding_method != 0b0:
             x = y = 0
 
-            while x + y * 56 < self.total_px:
+            while x * 56 + y < self.total_px:
                 sec[x + y * 56] ^= pri[x + y * 56]
 
                 y += 1
@@ -175,18 +169,15 @@ class Sprite(BitStream):
                 if y == 56:
                     y = 0
                     x += 1
-
-        print(self.Buffer_B)
-        print(self.Buffer_C)
         
-        for ty in range(h):
-            for tx in range(self.sprite_width):
+        for tx in range(self.sprite_width):
+            for ty in range(h):
                 src = tx * 8 + ty * w
                 dst = (tx * 8 + x_offset) + (ty + y_offset) * w
 
                 self.Buffer_A[dst:dst + 8] = self.Buffer_B[src:src + 8]
 
-        self.Buffer_B = bytearray(7 * 8 * 7 * 8)
+        self.Buffer_B = bytearray((7 * 8) * (7 * 8))
 
         for ty in range(h):
             for tx in range(self.sprite_width):
@@ -221,16 +212,17 @@ class Sprite(BitStream):
                     (self.Buffer_B[base + 7])
                 )
 
-    def render(self):
-        for y in range(self.height_px):
-            for x in range(self.sprite_width):
+    def render(self, Buffer):
+        for y in range(56):
+            for x in range(7):
                 for i in range(8):
-                    hi = (self.Sprite[x + (y * 2) * self.sprite_width] >> (7 - i)) & 1
-                    lo = (self.Sprite[x + (y * 2 + 1) * self.sprite_width] >> (7 - i)) & 1
+                    hi = (Buffer[x + (y * 2) * self.sprite_width] >> (7 - i)) & 1
+                    lo = (Buffer[x + (y * 2 + 1) * self.sprite_width] >> (7 - i)) & 1
 
                     printColor(hi << 1 | lo)
 
             print()
+        print()
 
 def main():
     file_adr = input("Enter the compressed binary file address (*.bin): ")
@@ -241,10 +233,12 @@ def main():
     sprite = Sprite(data)
 
     sprite.decompress()
+    sprite.render(sprite.getBuffer(sprite.buffer_type ^ 1))
     sprite.getEncodingMethod()
     sprite.decompress()
+    sprite.render(sprite.getBuffer(sprite.buffer_type ^ 1))
     sprite.decode()
-    sprite.render()
+    sprite.render(sprite.Sprite)
 
 if __name__ == "__main__":
     main()
